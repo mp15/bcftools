@@ -44,6 +44,8 @@ THE SOFTWARE.  */
 #define IRC_STATS 1
 #define IRC_RLEN 10
 #define NA_STRING "0"
+#define N_AC_BINS 5
+static const int AC_BIN_DEF[N_AC_BINS][2] = {{0,0},{1,1},{2,2},{3,20},{21,INT_MAX}};
 
 typedef struct
 {
@@ -97,6 +99,9 @@ typedef struct
     idist_t dp, dp_sites;
     int nusr;
     user_stats_t *usr;
+    // Allele count data
+    int* ac_counts_snps;
+    int* ac_counts_indels;
 }
 stats_t;
 
@@ -424,6 +429,8 @@ static void init_stats(args_t *args)
         stats->af_ts       = (int*) calloc(args->m_af,sizeof(int));
         stats->af_tv       = (int*) calloc(args->m_af,sizeof(int));
         stats->af_snps     = (int*) calloc(args->m_af,sizeof(int));
+        stats->ac_counts_snps   = (int*) calloc(N_AC_BINS, sizeof(int));
+        stats->ac_counts_indels   = (int*) calloc(N_AC_BINS, sizeof(int));
         int j;
         for (j=0; j<3; j++) stats->af_repeats[j] = (int*) calloc(args->m_af,sizeof(int));
         #if QUAL_STATS
@@ -530,6 +537,8 @@ static void destroy_stats(args_t *args)
         }
         free(stats->usr);
         if ( args->exons ) free(stats->smpl_frm_shifts);
+        free(stats->ac_counts_snps);
+        free(stats->ac_counts_indels);
     }
     for (j=0; j<args->nusr; j++) free(args->usr[j].tag);
     free(args->usr);
@@ -578,6 +587,30 @@ static void init_iaf(args_t *args, bcf_sr_t *reader)
             args->tmp_iaf[i] = 0;
 
     // todo: otherwise use AF
+}
+
+static int bin_for_ac(args_t *args, int ac)
+{
+    size_t i;
+    for (i = 0; i < N_AC_BINS; ++i) {
+        if (ac >= AC_BIN_DEF[i][0] && ac <= AC_BIN_DEF[i][1]) return i;
+    }
+    return 0;
+}
+
+static void count_ac(args_t *args, int *ac_counts, bcf_sr_t *reader)
+{
+    bcf1_t *line = reader->buffer[0];
+    int *ac = (int*)malloc(line->n_allele*sizeof(int));
+    int ret = bcf_calc_ac(reader->header, line, ac, args->samples_list ? BCF_UN_INFO|BCF_UN_FMT : BCF_UN_INFO);
+    if (ret)
+    {
+        for (int i = 0; i < line->n_allele; ++i) {
+            int bin = bin_for_ac(args, ac[i]);
+            ac_counts[bin]++;
+        }
+    }
+    free(ac);
 }
 
 static inline void do_mnp_stats(args_t *args, stats_t *stats, bcf_sr_t *reader)
@@ -1019,10 +1052,14 @@ static void do_vcf_stats(args_t *args)
 
         stats->n_records++;
 
-        if ( line_type&VCF_SNP )
+        if ( line_type&VCF_SNP ) {
             do_snp_stats(args, stats, reader);
-        if ( line_type&VCF_INDEL )
+            count_ac(args, stats->ac_counts_snps, reader);
+        }
+        if ( line_type&VCF_INDEL ) {
             do_indel_stats(args, stats, reader);
+            count_ac(args, stats->ac_counts_indels, reader);
+        }
         if ( line_type&VCF_MNP )
             do_mnp_stats(args, stats, reader);
         if ( line_type&VCF_OTHER )
@@ -1335,6 +1372,18 @@ static void print_stats(args_t *args)
             else printf("%d", idist_i2bin(&stats->dp,i));
             printf("\t%"PRId64"\t%f", stats->dp.vals[i], sum ? stats->dp.vals[i]*100./sum : 0);
             printf("\t%"PRId64"\t%f\n", stats->dp_sites.vals[i], sum_sites ? stats->dp_sites.vals[i]*100./sum_sites : 0);
+        }
+    }
+    printf("# AC, Allele Count\n# AC\t[2]id\t[3]bin min\t[4]bin max\t[5]number of SNP alleles in bin\t[6]number of INDEL alleles in bin\n");
+    for (id=0; id<args->nstats; id++)
+    {
+        stats_t *stats = &args->stats[id];
+        for (i=0; i< N_AC_BINS; ++i)
+        {
+            if (AC_BIN_DEF[i][1] == INT_MAX)
+                printf("AC\t%d\t%d\tNA\t%d\t%d\n", id, AC_BIN_DEF[i][0], stats->ac_counts_snps[i], stats->ac_counts_indels[i]);
+            else
+                printf("AC\t%d\t%d\t%d\t%d\t%d\n", id, AC_BIN_DEF[i][0], AC_BIN_DEF[i][1], stats->ac_counts_snps[i], stats->ac_counts_indels[i]);
         }
     }
 
